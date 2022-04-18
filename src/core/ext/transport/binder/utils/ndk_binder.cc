@@ -24,20 +24,30 @@
 
 #include <grpc/support/log.h>
 
+#include "src/core/ext/transport/binder/utils/jni_binder.h"
 #include "src/core/lib/gpr/tls.h"
 #include "src/core/lib/gprpp/sync.h"
 
 namespace {
+// Returns the handle of a suitable (API level >= 33) NDK Binder library.
+// Otherwise, returns a nullptr.
 void* GetNdkBinderHandle() {
   // TODO(mingcl): Consider using RTLD_NOLOAD to check if it is already loaded
   // first
   static void* handle = dlopen("libbinder_ndk.so", RTLD_LAZY);
-  if (handle == nullptr) {
-    gpr_log(
-        GPR_ERROR,
-        "Cannot open libbinder_ndk.so. Does this device support API level 29?");
-    GPR_ASSERT(0);
-  }
+  static bool initialized = false;
+  static grpc_core::Mutex mu;
+  grpc_core::MutexLock lock(&mu);
+
+  if (initialized) return handle;
+  initialized = true;
+
+  if (handle == nullptr) return handle;
+
+  // AIBinder_Class_disableInterfaceTokenHeader is available since API level 33.
+  // If the API level <= 32, it drops the current handle and returns a nullptr.
+  void* f_ptr = dlsym(handle, "AIBinder_Class_disableInterfaceTokenHeader");
+  if (f_ptr == nullptr) handle = nullptr;
   return handle;
 }
 
@@ -47,6 +57,11 @@ grpc_core::Mutex g_jvm_mu;
 // Whether the thread has already attached to JVM (this is to prevent
 // repeated attachment in `AttachJvm()`)
 GPR_THREAD_LOCAL(bool) g_is_jvm_attached = false;
+
+}  // namespace
+
+namespace grpc_binder {
+namespace ndk_util {
 
 void SetJvm(JNIEnv* env) {
   // OK to lock here since this function will only be called once for each
@@ -87,23 +102,33 @@ bool AttachJvm() {
   return true;
 }
 
-}  // namespace
+JNIEnv* GetJNIEnv() {
+  grpc_core::MutexLock lock(&g_jvm_mu);
+  // assumes the JVM is already cached
+  JNIEnv* env;
+  g_jvm->AttachCurrentThread(&env, /* thr_args= */ nullptr);
+  return env;
+}
 
-namespace grpc_binder {
-namespace ndk_util {
-
-// Helper macro to obtain the function pointer corresponding to the name
-#define FORWARD(name)                                                  \
-  typedef decltype(&name) func_type;                                   \
-  static func_type ptr =                                               \
-      reinterpret_cast<func_type>(dlsym(GetNdkBinderHandle(), #name)); \
-  if (ptr == nullptr) {                                                \
-    gpr_log(GPR_ERROR,                                                 \
-            "dlsym failed. Cannot find %s in libbinder_ndk.so. "       \
-            "BinderTransport requires API level >= 33",                \
-            #name);                                                    \
-    GPR_ASSERT(0);                                                     \
-  }                                                                    \
+// Helper macro to obtain the function pointer corresponding to the name.
+// * If API level >= 33, Binder NDK has all the APIs we need. This simply
+// returns the function from Binder NDK library.
+// * If API level 29~32, Binder NDK only has part APIs we need. This delegates
+// to the implementation when API level <= 28.
+// * If API level <= 28, there is no Binder NDK. This returns the function in
+// jni_binder.cc which we implement by ourselves.
+#define FORWARD(name)                                           \
+  typedef decltype(&name) func_type;                            \
+  static func_type ptr = []() {                                 \
+    void* handle = GetNdkBinderHandle();                        \
+    if (handle != nullptr) {                                    \
+      gpr_log(GPR_ERROR, "Rokya: 0111A call handle " #name);    \
+      return reinterpret_cast<func_type>(dlsym(handle, #name)); \
+    } else {                                                    \
+      gpr_log(GPR_ERROR, "Rokya: 0111A call JNI_" #name);       \
+      return JNI_##name;                                        \
+    };                                                          \
+  }();                                                          \
   return ptr
 
 void AIBinder_Class_disableInterfaceTokenHeader(AIBinder_Class* clazz) {
