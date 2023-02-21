@@ -396,7 +396,7 @@ absl::Status WireReaderImpl::ProcessStreamingTransactionImpl(
         [this, code,
          initial_metadata_or_error = std::move(initial_metadata_or_error)]() {
           this->transport_stream_receiver_->NotifyRecvInitialMetadata(
-              code, std::move(initial_metadata_or_error));
+              code, initial_metadata_or_error);
         });
     *cancellation_flags &= ~kFlagPrefix;
   }
