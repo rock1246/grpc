@@ -17,7 +17,9 @@
 
 #include <grpc/support/port_platform.h>
 
+#include <functional>
 #include <memory>
+#include <queue>
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
@@ -99,9 +101,11 @@ class WireReaderImpl : public WireReader {
  private:
   absl::Status ProcessStreamingTransaction(transaction_code_t code,
                                            ReadableParcel* parcel);
-  absl::Status ProcessStreamingTransactionImpl(transaction_code_t code,
-                                               ReadableParcel* parcel,
-                                               int* cancellation_flags)
+  absl::Status ProcessStreamingTransactionImpl(
+      transaction_code_t code, ReadableParcel* parcel, int* cancellation_flags,
+      // The queue saves the actions needed to be done "WITHOUT" `mu_`.
+      // It prevents deadlock against wire writer issues.
+      std::queue<std::function<void()>>& deferred_func_queue)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   std::shared_ptr<TransportStreamReceiver> transport_stream_receiver_;
